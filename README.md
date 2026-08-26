@@ -4,17 +4,6 @@ Unified AWS asset discovery tool that merges ELB CNAME-chain walking with AWS IP
 
 ---
 
-## Overview
-
-aws_hunter combines two previously separate workflows:
-
-- **ELB discovery (elbhunter)** — walks the CNAME chain of each domain until it hits an `*.elb.amazonaws.com` hostname, classifies the load balancer type, and extracts the region.
-- **AWS IP range identification (aws_ip_ranger)** — checks bare IPs against Amazon's published `ip-ranges.json`, returning service, region, and CIDR.
-
-A PTR reverse-DNS fallback catches Route53 Alias records that bypass CNAME chains entirely.
-
----
-
 ## Features
 
 - Mixed input — accepts domains, bare IPs, URLs, and CIDR-resolved hosts in the same file
