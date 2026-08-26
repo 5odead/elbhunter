@@ -1,122 +1,190 @@
-# elbhunter
+# aws_hunter
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-2.0.1-green.svg)](https://github.com/5odead/elbhunter)
+Unified AWS asset discovery tool that merges ELB CNAME-chain walking with AWS IP range identification into a single, threaded CLI. Feed it a mixed list of domains, IPs, or URLs and it tells you what is running on AWS — confirmed ELBs, EC2 instances, CloudFront, S3, and more.
 
-**Blazingly fast, completely passive AWS Elastic Load Balancer (ELB) discovery tool.**
+---
 
-`elbhunter` identifies AWS Load Balancers hidden behind complex DNS CNAME chains and Route53 Alias records using **zero HTTP requests** to the target infrastructure. Built for high-scale VAPT reconnaissance workflows.
+## Overview
+
+aws_hunter combines two previously separate workflows:
+
+- **ELB discovery (elbhunter)** — walks the CNAME chain of each domain until it hits an `*.elb.amazonaws.com` hostname, classifies the load balancer type, and extracts the region.
+- **AWS IP range identification (aws_ip_ranger)** — checks bare IPs against Amazon's published `ip-ranges.json`, returning service, region, and CIDR.
+
+A PTR reverse-DNS fallback catches Route53 Alias records that bypass CNAME chains entirely.
 
 ---
 
 ## Features
 
-- **100% Passive** — Zero HTTP/HTTPS requests. No interaction with target WAFs, web servers, or load balancers.
-- **Multi-Hop CNAME Walking** — Automatically follows deep CNAME chains (e.g., `app.com` → `cdn.net` → `elb.amazonaws.com`).
-- **Route53 Alias Detection** — Optional PTR reverse-lookup (`--ptr`) to catch naked domains using Route53 Alias records that bypass standard CNAMEs.
-- **High-Performance** — ThreadPoolExecutor-based concurrency with intelligent UDP retry and TCP fallback mechanisms.
-- **Smart Classification** — Heuristically identifies ELB types (K8s NLB, ALB/NLB, Classic, Internal) and extracts AWS regions directly from hostnames.
-- **Rich Output** — Color-coded terminal output with real-time progress bars and summary statistics.
-- **Flexible Export** — Supports `.json`, `.csv`, and grep-friendly `.txt` output formats.
+- Mixed input — accepts domains, bare IPs, URLs, and CIDR-resolved hosts in the same file
+- CNAME chain walk up to a configurable depth (default: 10 hops)
+- ELB type classification: ALB/NLB, Internal ELB, K8s NLB, Classic/ALB
+- IP range lookup against the official AWS `ip-ranges.json` (cached between runs)
+- PTR reverse-DNS fallback for domains that use Route53 Alias records
+- EC2 PTR hostname parsing for region extraction (`ec2-*.compute.amazonaws.com`)
+- Threaded scanning with a configurable worker count (default: 80)
+- Rich progress bar with live ELB/AWS/error counters
+- Quiet/pipeline mode: suppresses UI, emits tab-separated hits to stdout
+- Output formats: `.xlsx` (colour-coded with summary sheet), `.csv`, `.json`, `.txt`
+- DNS retry with UDP → TCP fallback; supports custom resolver files
+
+---
+
+## Requirements
+
+- Python 3.8 or later
+- `aws_shared.py` in the same directory — required for IP range lookup and Excel output. Without it the tool falls back to DNS-only mode and cannot write `.xlsx`.
 
 ---
 
 ## Installation
 
-**Prerequisites:** Python 3.8+ and `pip`
-
 ```bash
-# 1. Clone the repository
-git clone https://github.com/5odead/elbhunter.git
-cd elbhunter
-
-# 2. Install dependencies
-pip install -r requirements.txt
+pip install dnspython rich requests pandas openpyxl tqdm
 ```
 
-**`requirements.txt`**
-```
-dnspython>=2.4.0
-rich>=13.0.0
-```
+Clone or copy `aws_hunter.py` and `aws_shared.py` into the same directory.
 
 ---
 
 ## Usage
 
-### Basic Scan
-
-Scan a list of targets and display results in the terminal:
-
-```bash
-python elbhunter.py -t targets.txt
+```
+python aws_hunter.py -t <targets_file> [options]
 ```
 
-### Advanced Scan *(Recommended for Large Lists)*
-
-Scan 10,000+ targets with high concurrency, save to JSON, and enable PTR lookups:
+### Examples
 
 ```bash
-python elbhunter.py -t targets.txt -o results.json -w 500 --ptr
-```
+# Basic scan, print results to terminal
+python aws_hunter.py -t targets.txt
 
-### Quiet / Pipeline Mode
+# Save to Excel with colour-coding and a summary sheet
+python aws_hunter.py -t targets.txt -o results.xlsx
 
-Suppress all UI elements and output only the discovered ELB hostnames — perfect for piping into other tools:
+# Save to CSV
+python aws_hunter.py -t targets.txt -o results.csv
 
-```bash
-python elbhunter.py -t targets.txt -q | tee elb_hosts.txt
-```
+# Save to JSON
+python aws_hunter.py -t targets.txt -o results.json
 
-### Custom Resolvers
+# 100 workers, PTR fallback enabled
+python aws_hunter.py -t targets.txt -w 100 --ptr
 
-Use your own list of DNS resolvers instead of the built-in public ones:
+# Pipeline mode — pipe TSV hits to another tool
+python aws_hunter.py -t targets.txt -q | grep ELB
 
-```bash
-python elbhunter.py -t targets.txt --resolvers my_resolvers.txt
+# DNS only — skip ip-ranges.json download entirely
+python aws_hunter.py -t targets.txt --no-aws-ranges
+
+# Force refresh of the cached ip-ranges.json
+python aws_hunter.py -t targets.txt --force-refresh
 ```
 
 ---
 
-## Command-Line Arguments
+## Target File Format
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-t, --targets` | **(Required)** Path to file containing target domains, one per line. | — |
-| `-o, --output` | Output file path. Format auto-detected from extension (`.json`, `.csv`, `.txt`). | `None` |
-| `-w, --workers` | Number of concurrent ThreadPool workers. | `150` |
-| `-q, --quiet` | Quiet mode. Suppresses banner/progress, prints only ELB hostnames. | `False` |
-| `--timeout` | DNS timeout per UDP attempt in seconds. | `3.0` |
-| `--retry` | DNS retry attempts per query before falling back to TCP. | `2` |
-| `--depth` | Maximum CNAME chain hops to follow. | `10` |
-| `--ptr` | Enable PTR reverse lookup. Catches Route53 Alias records (~2x slower). | `False` |
-| `--resolvers` | Path to a custom file containing DNS resolver IPs, one per line. | Built-in public resolvers |
+One entry per line. Accepts:
+
+- Bare domains: `example.com`
+- Full URLs: `https://example.com/path` (hostname is extracted automatically)
+- Bare IPs: `54.239.28.85`
+- IPv6: `2600:1f18::/36`
+- Lines beginning with `#` are treated as comments and skipped
+- Duplicate entries are deduplicated automatically
 
 ---
 
-## How It Works — The Passive Methodology
+## CLI Reference
 
-`elbhunter` is designed to be **completely invisible** to the target's security infrastructure:
-
-- **No Web Traffic** — The tool never sends HTTP, HTTPS, or direct TCP requests to ports 80/443. Target WAFs and Load Balancers will never log your IP.
-- **Public Resolver Routing** — DNS queries are sent to trusted public resolvers (Cloudflare `1.1.1.1`, Google `8.8.8.8`, Quad9, etc.).
-- **Cache Absorption** — The vast majority of queries are answered instantly from the public resolver's cache, meaning zero queries ever reach the target's authoritative DNS server.
-- **CNAME Chain Walking** — If a target uses a CDN (like Cloudflare), the tool follows the CNAME chain hop-by-hop until it terminates at an `*.elb.amazonaws.com` record, revealing the true backend infrastructure.
-- **PTR Fallback** — For apex domains using Route53 ALIAS records (which resolve directly to IPs without a CNAME), the `--ptr` flag performs a reverse DNS lookup on the resolved IP to uncover the hidden ELB hostname.
+| Flag | Default | Description |
+|---|---|---|
+| `-t`, `--targets` | required | Path to target file |
+| `-o`, `--output` | none | Output file (extension determines format: `.xlsx`, `.csv`, `.json`, `.txt`) |
+| `-w`, `--workers` | `80` | Number of parallel worker threads |
+| `-q`, `--quiet` | off | Suppress banner and progress bar; print TSV hits only |
+| `--timeout` | `3.0` | DNS timeout per UDP attempt, in seconds |
+| `--retry` | `2` | UDP retry count before falling back to TCP |
+| `--depth` | `10` | Maximum CNAME chain hops per domain |
+| `--ptr` | off | Enable PTR reverse-DNS fallback for domains (catches Route53 Alias records) |
+| `--resolvers` | built-in | Path to a custom resolver file (one IP per line) |
+| `--no-aws-ranges` | off | Skip `ip-ranges.json` download; DNS-only mode |
+| `--force-refresh` | off | Re-download `ip-ranges.json` even if a cached copy exists |
 
 ---
 
-## ⚠️ Legal Disclaimer
+## Output Columns
 
-> This tool is intended for **authorized security testing, bug bounty hunting, and VAPT reconnaissance workflows only.**
+| Column | Description |
+|---|---|
+| `target` | Original input value |
+| `input_type` | `DOMAIN` or `IP` |
+| `status` | `ELB` (confirmed load balancer), `AWS` (IP range hit), or `-` |
+| `elb_confirmed` | `yes` / `no` |
+| `aws_confirmed` | `yes` / `no` |
+| `elb_hostname` | Full `*.elb.amazonaws.com` hostname, if found |
+| `elb_type` | `ALB/NLB`, `Internal ELB`, `K8s NLB`, `Classic/ALB` |
+| `aws_service` | Service from `ip-ranges.json` (e.g. `EC2`, `CLOUDFRONT`, `S3`, `ELB`) |
+| `aws_cidr` | CIDR block the IP falls within |
+| `region` | AWS region extracted from hostname or range data |
+| `resolved_ips` | Comma-separated A records |
+| `cname_chain` | Arrow-separated chain of CNAMEs walked |
+| `ptr_hostname` | PTR record for IP targets, or PTR fallback result for domains |
+| `method` | How the hit was confirmed: `CNAME`, `PTR`, `PTR-IP`, `RANGE+PTR` |
+| `timestamp` | UTC ISO-8601 timestamp of the scan hit |
 
-- Do **not** use this tool against targets you do not have explicit permission to test.
-- The author is **not responsible** for any misuse or damage caused by this program.
-- Always adhere to the **Rules of Engagement (RoE)** of your specific assessment.
+---
+
+## Detection Logic
+
+### Domain path
+
+1. Walk the CNAME chain up to `--depth` hops.
+2. At each hop, test the CNAME value against the ELB hostname pattern (`*.REGION.elb.amazonaws.com`, older Classic format, China variant).
+3. On a match, resolve A records, optionally look up the CIDR, classify the ELB type, extract the region, and record the hit.
+4. If no ELB appears in the chain and `--ptr` is set, resolve the domain to IPs and run a PTR query on each — catches Route53 Alias targets that don't produce CNAME records.
+
+### IP path
+
+1. Check the IP against pre-built AWS prefix networks (from `ip-ranges.json`).
+2. Run a PTR query. If the PTR hostname matches an ELB or EC2 pattern, record accordingly.
+3. Non-AWS IPs where PTR returns a non-Amazon hostname (e.g. `8.8.8.8` → `dns.google`) are silently skipped.
+
+### ELB type classification
+
+| Label | Detection rule |
+|---|---|
+| `Internal ELB` | First hostname label starts with `internal-` |
+| `K8s NLB` | First label starts with `k8s-` |
+| `ALB/NLB` | Suffix after the last `-` is 8+ hex or decimal characters |
+| `Classic/ALB` | Anything else |
+
+`dualstack.` prefixes (IPv4/IPv6 dual-stack aliases) are stripped before classification.
+
+---
+
+## Caching
+
+`ip-ranges.json` is cached locally as `.aws_ip_ranges_cache.json` alongside an ETag token in `.aws_ip_ranges_token.txt`. Subsequent runs perform a conditional GET and skip the download when the file has not changed upstream. Use `--force-refresh` to bypass the cache.
+
+---
+
+## Dependencies
+
+| Package | Purpose |
+|---|---|
+| `dnspython` | DNS resolution, CNAME walking, PTR lookups |
+| `rich` | Terminal UI, progress bar, colour output |
+| `requests` | Fetching `ip-ranges.json` (via `aws_shared`) |
+| `pandas` | DataFrame construction for Excel/CSV output (via `aws_shared`) |
+| `openpyxl` | `.xlsx` writing (via `aws_shared`) |
+| `tqdm` | Optional progress dependency for `aws_shared` |
+| `aws_shared` | IP range loader, Excel writer, colour rules — optional but recommended |
 
 ---
 
 ## License
 
-Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for more information.
+MIT
